@@ -59,20 +59,33 @@ static struct param_t param_config_[NUM_PARAMS] = {
     */
 
     /*
-    Interval in microseconds at which UAVCAN TrueAirspeed messages
+    Sensor zero offset N.
+    */
+    {PARAM_SENSOR_OFFSET, PARAM_TYPE_FLOAT,
+        "sensor_offset",
+        0.0f, -1000.0f, 1000.0f},
+
+    /*
+    Sensor scale in mN/LSB.
+    */
+    {PARAM_SENSOR_SCALE, PARAM_TYPE_FLOAT,
+        "sensor_scale",
+        1.0f, 1e-3f, 1e3f},
+
+    /*
+    Interval in microseconds at which UAVCAN hardpoint Status messages
     should be sent. Zero disables publication.
     */
-    {PARAM_UAVCAN_TRUEAIRSPEED_INTERVAL, PARAM_TYPE_INT,
-        "uavcan.pubp-uavcan.equipment.air_data.TrueAirspeed",
+    {PARAM_UAVCAN_STATUS_INTERVAL, PARAM_TYPE_INT,
+        "uavcan.pubp-uavcan.equipment.hardpoint.Status",
         50e3f, 0.0f, 1e6f},
 
     /*
-    Interval in microseconds at which UAVCAN IndicatedAirspeed messages
-    should be sent. Zero disables publication.
+    UAVCAN hardpoint index.
     */
-    {PARAM_UAVCAN_INDICATEDAIRSPEED_INTERVAL, PARAM_TYPE_INT,
-        "uavcan.pubp-uavcan.equipment.air_data.IndicatedAirspeed",
-        50e3f, 0.0f, 1e6f},
+    {PARAM_UAVCAN_HARDPOINT_ID, PARAM_TYPE_INT,
+        "uavcan.id-uavcan.equipment.hardpoint-hardpoint_id",
+        0.0f, 0.0f, 127.0f}
 };
 
 

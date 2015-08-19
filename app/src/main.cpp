@@ -11,90 +11,18 @@ static volatile uint32_t g_uptime;
 static struct bootloader_app_shared_t g_bootloader_app_shared;
 
 
-const float FIR_TAPS[] = {
-    -0.000076,
-    -0.000465,
-    -0.000989,
-    -0.001642,
-    -0.002403,
-    -0.003240,
-    -0.004106,
-    -0.004941,
-    -0.005672,
-    -0.006220,
-    -0.006498,
-    -0.006418,
-    -0.005898,
-    -0.004860,
-    -0.003244,
-    -0.001005,
-     0.001877,
-     0.005397,
-     0.009522,
-     0.014191,
-     0.019313,
-     0.024773,
-     0.030431,
-     0.036132,
-     0.041707,
-     0.046985,
-     0.051795,
-     0.055978,
-     0.059393,
-     0.061922,
-     0.063476,
-     0.064000,
-     /* Everything below is mirrored */
-     0.063476,
-     0.061922,
-     0.059393,
-     0.055978,
-     0.051795,
-     0.046985,
-     0.041707,
-     0.036132,
-     0.030431,
-     0.024773,
-     0.019313,
-     0.014191,
-     0.009522,
-     0.005397,
-     0.001877,
-    -0.001005,
-    -0.003244,
-    -0.004860,
-    -0.005898,
-    -0.006418,
-    -0.006498,
-    -0.006220,
-    -0.005672,
-    -0.004941,
-    -0.004106,
-    -0.003240,
-    -0.002403,
-    -0.001642,
-    -0.000989,
-    -0.000465,
-    -0.000076
-};
-
-
 /* Written to the firmware image in post-processing */
 extern volatile struct bootloader_app_descriptor flash_app_descriptor;
 
 
-#define SENSOR_STARTUP_MS 200u
-
-
-static void spi_init(void);
-static uint32_t spi_read(void);
+static bool serial_read(int32_t *result);
 
 
 static void node_init(uint8_t node_id);
 static void node_run(uint8_t node_id, Configuration& configuration);
 
 
-extern "C" int main(int argc, char *argv[]) {
+extern "C" void main(void) {
     up_cxxinitialize();
     board_initialize();
     irqenable();
@@ -107,7 +35,6 @@ extern "C" int main(int argc, char *argv[]) {
     correctly.
     */
     if (bootloader_read(&g_bootloader_app_shared)) {
-        spi_init();
         can_init(g_bootloader_app_shared.bus_speed);
         node_init(g_bootloader_app_shared.node_id);
         node_run(g_bootloader_app_shared.node_id, configuration);
@@ -144,89 +71,73 @@ static void node_init(uint8_t node_id) {
         1u, UAVCAN_PROTOCOL_RESTARTNODE, true,
         uavcan::protocol::RestartNode::DefaultDataTypeID,
         node_id);
-
-    can_set_dtid_filter(
-        0u, UAVCAN_EQUIPMENT_AIR_DATA_STATICPRESSURE, false,
-        uavcan::equipment::air_data::StaticPressure::DefaultDataTypeID,
-        node_id);
-    can_set_dtid_filter(
-        0u, UAVCAN_EQUIPMENT_AIR_DATA_STATICTEMPERATURE, false,
-        uavcan::equipment::air_data::StaticTemperature::DefaultDataTypeID,
-        node_id);
 }
 
 
-static void spi_init(void) {
-    putreg32(getreg32(STM32_RCC_APB1ENR) | RCC_APB1ENR_SPI3EN,
-             STM32_RCC_APB1ENR);
-
-    stm32_configgpio(GPIO_SPI3_SCK_1);
-    stm32_configgpio(GPIO_SPI3_MISO_1);
-    stm32_configgpio(GPIO_NSS);
-    stm32_configgpio(GPIO_SENSON);
+static bool serial_read(int32_t *result) {
+    uint8_t val, clocks;
+    uint32_t temp;
 
     /*
-    SPI device configuration. Refer to:
-    "SPI Communication with Honeywell Digital Output Pressure Sensors"
-    (Honeywell TN008202)
+    From the datasheet
+    (https://cdn.sparkfun.com/datasheets/Sensors/ForceFlex/hx711_english.pdf):
 
-    Clock is low when idle (CPOL=0); data is latched on the positive-going
-    clock edge (CPHA=0). Frequency must be 50-800 kHz.
+    "Pin PD_SCK and DOUT are used for data retrieval, input selection, gain
+    selection and power down controls.
 
-    At least 2.5 us is required between SS going low and the first clock
-    transition. At least 2 us is required from SS going high to SS going low
-    again.
+    When output data is not ready for retrieval, digital output pin DOUT is
+    high. Serial clock input PD_SCK should be low. When DOUT goes to low, it
+    indicates data is ready for retrieval. By applying 25~27 positive clock
+    pulses at the PD_SCK pin, data is shifted out from the DOUT output pin.
+    Each PD_SCK pulse shifts out one bit, starting with the MSB bit first,
+    until all 24 bits are shifted out. The 25th pulse at PD_SCK input will
+    pull DOUT pin back to high (Fig.2).
 
-    Here, set f = PCLK / 64 (i.e. 562.5 kHz) and MSTR mode.
+    Input and gain selection is controlled by the number of the input PD_SCK
+    pulses (Table 3). PD_SCK clock pulses should not be less than 25 or more
+    than 27 within one conversion period, to avoid causing serial
+    communication error."
+
+    The minimum pulse width is 0.1 us, and the max is 50 us. We need to wait
+    at least 0.1 us after DOUT goes low before we can transition PD_SCK high,
+    but that's only 7 cycles so we'll always be waiting longer than that.
     */
-    putreg16(SPI_CR1_FPCLCKd64 | SPI_CR1_MSTR, STM32_SPI3_CR1);
+
+    temp = 0u;
+
+    /* If DOUT is high, data is NOT ready */
+    val = stm32_gpioread(GPIO_DOUT);
+    if (val) {
+        return false;
+    }
+
+    for (clocks = 0; clocks < 25u; clocks++) {
+        /*
+        DOUT is high, so transition PD_SCK high and wait 1-2 us for the data
+        to settle
+        */
+        stm32_gpiowrite(GPIO_PD_SCK, 1u);
+        for (volatile uint8_t x = 0; x < 36u; x++);
+
+        /* Sample the data */
+        val = stm32_gpioread(GPIO_DOUT);
+        temp = (temp << 1u) | (val ? 1u : 0u);
+
+        /* Push PD_SCK low again, and wait a bit longer */
+        stm32_gpiowrite(GPIO_PD_SCK, 0u);
+        for (volatile uint8_t x = 0; x < 36u; x++);
+    }
 
     /*
-    Set FRXTH to trigger RXNE when 16 bits have been received, DS to
-    1111 for 16-bit, and SSOE to enable the NSS pin.
+    We read 25 bits in the loop above, and the final bit is always one, so
+    shift the output back down.
     */
-    putreg16(SPI_CR2_FRXTH | SPI_CR1_DS_16BIT | SPI_CR2_SSOE, STM32_SPI3_CR2);
-}
+    temp >>= 1u;
 
+    /* Result is 2s-complement 24-bit, so sign-extend and convert to int32 */
+    *result = (int32_t)(temp ^ 0x800000u) - 0x800000;
 
-static uint32_t spi_read(void) {
-    volatile uint32_t result;
-
-    /* Enable SPI and drive NSS low */
-    putreg16(getreg16(STM32_SPI3_CR1) | SPI_CR1_SPE, STM32_SPI3_CR1);
-    stm32_gpiowrite(GPIO_NSS, 0u);
-
-    /* Wait a bit */
-    for (volatile int x = 0; x < 200; x++);
-
-    /* Write 16 bits to the data register */
-    putreg16(0, STM32_SPI3_DR);
-
-    /* Wait for TXE and RXNE to go high, and BSY to go low */
-    const uint16_t done_status = SPI_SR_TXE | SPI_SR_RXNE;
-    const uint16_t done_mask = SPI_SR_TXE | SPI_SR_RXNE | SPI_SR_BSY;
-    while ((getreg16(STM32_SPI3_SR) ^ done_status) & done_mask);
-
-    /* Collect the data */
-    result = getreg16(STM32_SPI3_DR);
-
-    /* Disable SPI and drive NSS high */
-    putreg16(getreg16(STM32_SPI3_CR1) & ~SPI_CR1_SPE, STM32_SPI3_CR1);
-    stm32_gpiowrite(GPIO_NSS, 1u);
-
-    /* Swap bytes */
-    return result << 16u;
-}
-
-
-static float pressure_from_count(uint16_t count) {
-    /* Params for HSCMRRN100MDSA3 */
-    const float COUNT_MAX = 16383.0f;
-    const float PRESSURE_MIN = -100.0f, PRESSURE_MAX = 100.0f;
-    const float PA_PER_MBAR = 100.0f;
-
-    return (((float)count / COUNT_MAX - 0.1f) *
-            (PRESSURE_MAX - PRESSURE_MIN) / 0.8f + PRESSURE_MIN) * PA_PER_MBAR;
+    return true;
 }
 
 
@@ -235,166 +146,48 @@ static void __attribute__((noreturn)) node_run(
     Configuration& configuration
 ) {
     size_t length, i;
-    uint32_t message_id, current_time, status_time, tas_time, ias_time,
-             status_interval, tas_interval, ias_interval, last_tx_time,
-             sensor_data;
-    uint8_t filter_id, tas_transfer_id, status_transfer_id,
-            ias_transfer_id, message[8], delay_line_idx;
+    uint32_t message_id, current_time, status_time, hardpoint_time,
+             status_interval, hardpoint_interval, last_tx_time;
+    int32_t sensor_data_lsb;
+    uint8_t filter_id, hardpoint_transfer_id, status_transfer_id, message[8],
+            hardpoint_id, service_filter_id;
     bool param_valid, wants_bootloader_restart;
     struct param_t param;
-    float value, ias_delay_line[64], tas_delay_line[64], ias_accum, tas_accum,
-          ias_lpf_coeff, tas_lpf_coeff, ias_out, tas_out, wb,
-          offset_pressure_pa;
+    float weight_n, sensor_offset_n, sensor_scale_n_per_lsb, value;
 
     UAVCANTransferManager broadcast_manager(node_id);
     UAVCANTransferManager service_manager(node_id);
 
-    uavcan::equipment::air_data::StaticTemperature static_temp;
-    uavcan::equipment::air_data::StaticPressure static_pressure;
     uavcan::protocol::param::ExecuteOpcode::Request xo_req;
     uavcan::protocol::param::GetSet::Request gs_req;
     uavcan::protocol::RestartNode::Request rn_req;
 
-    float static_pressure_pa, static_pressure_var_pa2;
-    float static_temp_k, static_temp_var_k2;
-    float differential_pressure_pa;
+    hardpoint_transfer_id = status_transfer_id = 0u;
+    hardpoint_time = status_time = last_tx_time = 0u;
 
-    tas_transfer_id = status_transfer_id = ias_transfer_id = 0u;
-    tas_time = status_time = ias_time = last_tx_time = 0u;
+    service_filter_id = 0xFFu;
 
     wants_bootloader_restart = false;
 
-    delay_line_idx = 0u;
-
     status_interval = 900u;
-    tas_interval = (uint32_t)(configuration.get_param_value_by_index(
-        PARAM_UAVCAN_TRUEAIRSPEED_INTERVAL) * 1e-3f);
-    ias_interval = (uint32_t)(configuration.get_param_value_by_index(
-        PARAM_UAVCAN_INDICATEDAIRSPEED_INTERVAL) * 1e-3f);
+    hardpoint_interval = (uint32_t)(configuration.get_param_value_by_index(
+        PARAM_UAVCAN_STATUS_INTERVAL) * 1e-3f);
+    hardpoint_id = (uint8_t)configuration.get_param_value_by_index(
+        PARAM_UAVCAN_HARDPOINT_ID);
 
-    static_pressure_pa = STANDARD_PRESSURE_PA;
-    static_temp_k = STANDARD_TEMP_K;
-    differential_pressure_pa = 0.0f;
-    offset_pressure_pa = 0.0f;
-    tas_out = 0.0f;
-    ias_out = 0.0f;
-
-    if (tas_interval) {
-        wb = 2.0f * (float)M_PI / (tas_interval * 0.5f * 1e-3f);
-        tas_lpf_coeff = 1.0f - fast_expf(-wb * (1.0f / 250.0f));
-    } else {
-        tas_lpf_coeff = 1.0f;
-    }
-
-    if (ias_interval) {
-        wb = 2.0f * (float)M_PI / (ias_interval * 0.5f * 1e-3f);
-        ias_lpf_coeff = 1.0f - fast_expf(-wb * (1.0f / 250.0f));
-    } else {
-        ias_lpf_coeff = 1.0f;
-    }
+    weight_n = 0.0f;
+    sensor_offset_n =
+        configuration.get_param_value_by_index(PARAM_SENSOR_OFFSET);
+    sensor_scale_n_per_lsb =
+        configuration.get_param_value_by_index(PARAM_SENSOR_SCALE) * 1e-3f;
 
     while (true) {
         current_time = g_uptime;
 
-        /*
-        Read pressure (and temperature?); skip if the status bits are set,
-        which means we're reading stale data or there's been a sensor fault.
-        */
-        if (current_time > SENSOR_STARTUP_MS) {
-            sensor_data = spi_read();
-            if (!(sensor_data & 0xC0000000u)) {
-                differential_pressure_pa =
-                    pressure_from_count((sensor_data >> 16u) & 0x3FFFu);
-
-                if (current_time < SENSOR_STARTUP_MS * 10) {
-                    offset_pressure_pa +=
-                        (differential_pressure_pa - offset_pressure_pa) * 0.002f;
-                } else {
-                    differential_pressure_pa -= offset_pressure_pa;
-
-                    /*
-                    Convert dynamic pressure to IAS and TAS based on current
-                    static pressure/temp, then push IAS and TAS onto the delay
-                    lines
-                    */
-                    delay_line_idx++;
-                    ias_delay_line[delay_line_idx & 63u] =
-                        airspeed_from_pressure_temp(differential_pressure_pa,
-                                                    STANDARD_PRESSURE_PA,
-                                                    STANDARD_TEMP_K);
-                    tas_delay_line[delay_line_idx & 63u] =
-                        airspeed_from_pressure_temp(differential_pressure_pa,
-                                                    static_pressure_pa,
-                                                    static_temp_k);
-
-                    /*
-                    Every 8 samples, run the FIR decimation filter and accumulate
-                    the result into ias_out and tas_out using lpf_coeff to
-                    low-pass.
-                    */
-                    if ((delay_line_idx & 7u) == 0) {
-                        ias_accum = tas_accum = 0.0f;
-
-                        /*
-                        Starting with the sample before last, loop over the
-                        previous 63 samples and apply the FIR coefficients
-                        */
-                        for (i = 0; i < 63u; i++) {
-                            ias_accum +=
-                                ias_delay_line[(delay_line_idx - i) & 63u] *
-                                FIR_TAPS[i];
-                            tas_accum +=
-                                tas_delay_line[(delay_line_idx - i) & 63u] *
-                                FIR_TAPS[i];
-                        }
-
-                        /* We now have the accumulated value, so apply the IIR */
-                        ias_out += (ias_accum - ias_out) * ias_lpf_coeff;
-                        tas_out += (tas_accum - tas_out) * tas_lpf_coeff;
-                    }
-                }
-            }
-        }
-
-
-        /*
-        Check for UAVCAN static pressure/temp (FIFO 0) -- these are broadcasts
-        */
-        while (can_rx(0u, &filter_id, &message_id, &length, message)) {
-            uavcan::TransferCRC crc;
-
-            /* Filter IDs are per-FIFO, so convert this back to the bank index */
-            filter_id = (uint8_t)(filter_id + UAVCAN_EQUIPMENT_AIR_DATA_STATICPRESSURE);
-            switch (filter_id) {
-                case UAVCAN_EQUIPMENT_AIR_DATA_STATICPRESSURE:
-                    crc = uavcan::equipment::air_data::StaticPressure::getDataTypeSignature().toTransferCRC();
-                    break;
-                case UAVCAN_EQUIPMENT_AIR_DATA_STATICTEMPERATURE:
-                    crc = uavcan::equipment::air_data::StaticTemperature::getDataTypeSignature().toTransferCRC();
-                    break;
-                default:
-                    break;
-            }
-            broadcast_manager.receive_frame(current_time, message_id, crc,
-                                            length, message);
-
-            if (broadcast_manager.is_rx_done()) {
-                break;
-            }
-        }
-
-        if (broadcast_manager.is_rx_done()) {
-            if (filter_id == UAVCAN_EQUIPMENT_AIR_DATA_STATICPRESSURE &&
-                    broadcast_manager.decode_air_data_staticpressure(static_pressure)) {
-                static_pressure_pa = static_pressure.static_pressure;
-                static_pressure_var_pa2 =
-                    static_pressure.static_pressure_variance;
-            } else if (filter_id == UAVCAN_EQUIPMENT_AIR_DATA_STATICTEMPERATURE &&
-                        broadcast_manager.decode_air_data_statictemperature(static_temp)) {
-                static_temp_k = static_temp.static_temperature;
-                static_temp_var_k2 =
-                    static_temp.static_temperature_variance;
-            }
+        /* Read the latest sensor data if available */
+        if (serial_read(&sensor_data_lsb)) {
+            weight_n = (float)sensor_data_lsb * sensor_scale_n_per_lsb -
+                       sensor_offset_n;
         }
 
         /*
@@ -426,6 +219,7 @@ static void __attribute__((noreturn)) node_run(
                                           length, message);
 
             if (service_manager.is_rx_done()) {
+                service_filter_id = filter_id;
                 break;
             }
         }
@@ -435,7 +229,7 @@ static void __attribute__((noreturn)) node_run(
         completely sent, to avoid overwriting the TX buffer.
         */
         if (service_manager.is_rx_done() && service_manager.is_tx_done()) {
-            if (filter_id == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE &&
+            if (service_filter_id == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE &&
                     service_manager.decode_executeopcode_request(xo_req)) {
                 /*
                 Return OK if the opcode is understood and the controller is
@@ -459,7 +253,7 @@ static void __attribute__((noreturn)) node_run(
                     xo_resp.ok = true;
                 }
                 service_manager.encode_executeopcode_response(xo_resp);
-            } else if (filter_id == UAVCAN_PROTOCOL_PARAM_GETSET &&
+            } else if (service_filter_id == UAVCAN_PROTOCOL_PARAM_GETSET &&
                     service_manager.decode_getset_request(gs_req)) {
                 uavcan::protocol::param::GetSet::Response resp;
 
@@ -479,7 +273,7 @@ static void __attribute__((noreturn)) node_run(
                                                                value);
                     } else if (param.public_type == PARAM_TYPE_INT && !gs_req.name.empty() &&
                             gs_req.value.is(uavcan::protocol::param::Value::Tag::integer_value)) {
-                        value = (float)gs_req.value.to<uavcan::protocol::param::Value::Tag::integer_value>();
+                        value = (float)((int32_t)gs_req.value.to<uavcan::protocol::param::Value::Tag::integer_value>());
                         configuration.set_param_value_by_index(param.index,
                                                                value);
                     }
@@ -494,15 +288,15 @@ static void __attribute__((noreturn)) node_run(
                         resp.min_value.to<uavcan::protocol::param::NumericValue::Tag::real_value>() = param.min_value;
                         resp.max_value.to<uavcan::protocol::param::NumericValue::Tag::real_value>() = param.max_value;
                     } else if (param.public_type == PARAM_TYPE_INT) {
-                        resp.value.to<uavcan::protocol::param::Value::Tag::integer_value>() = (int64_t)value;
-                        resp.default_value.to<uavcan::protocol::param::Value::Tag::integer_value>() = (int64_t)param.default_value;
-                        resp.min_value.to<uavcan::protocol::param::NumericValue::Tag::integer_value>() = (int64_t)param.min_value;
-                        resp.max_value.to<uavcan::protocol::param::NumericValue::Tag::integer_value>() = (int64_t)param.max_value;
+                        resp.value.to<uavcan::protocol::param::Value::Tag::integer_value>() = (int32_t)value;
+                        resp.default_value.to<uavcan::protocol::param::Value::Tag::integer_value>() = (int32_t)param.default_value;
+                        resp.min_value.to<uavcan::protocol::param::NumericValue::Tag::integer_value>() = (int32_t)param.min_value;
+                        resp.max_value.to<uavcan::protocol::param::NumericValue::Tag::integer_value>() = (int32_t)param.max_value;
                     }
                 }
 
                 service_manager.encode_getset_response(resp);
-            } else if (filter_id == UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE) {
+            } else if (service_filter_id == UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE) {
                 uavcan::protocol::file::BeginFirmwareUpdate::Response resp;
 
                 /*
@@ -512,7 +306,7 @@ static void __attribute__((noreturn)) node_run(
                 resp.error = resp.ERROR_OK;
                 wants_bootloader_restart = true;
                 service_manager.encode_beginfirmwareupdate_response(resp);
-            } else if (filter_id == UAVCAN_PROTOCOL_GETNODEINFO) {
+            } else if (service_filter_id == UAVCAN_PROTOCOL_GETNODEINFO) {
                 uavcan::protocol::GetNodeInfo::Response resp;
 
                 /* Empty request so don't need to decode */
@@ -532,18 +326,18 @@ static void __attribute__((noreturn)) node_run(
                     flash_app_descriptor.vcs_commit;
                 resp.software_version.image_crc =
                     flash_app_descriptor.image_crc;
-                resp.hardware_version.major = 1u;
-                resp.hardware_version.minor = 0u;
+                resp.hardware_version.major = HW_VERSION_MAJOR;
+                resp.hardware_version.minor = HW_VERSION_MINOR;
                 /* Set the unique ID */
                 memset(resp.hardware_version.unique_id.begin(), 0u,
                        resp.hardware_version.unique_id.size());
                 memcpy(resp.hardware_version.unique_id.begin(),
                        (uint8_t*)0x1ffff7ac, 12u);
                 /* Set the hardware name */
-                resp.name = "com.thiemar.p7000d-v1";
+                resp.name = HW_UAVCAN_NAME;
 
                 service_manager.encode_getnodeinfo_response(resp);
-            } else if (filter_id == UAVCAN_PROTOCOL_RESTARTNODE &&
+            } else if (service_filter_id == UAVCAN_PROTOCOL_RESTARTNODE &&
                     service_manager.decode_restartnode_request(rn_req)) {
                 uavcan::protocol::RestartNode::Response resp;
 
@@ -558,6 +352,8 @@ static void __attribute__((noreturn)) node_run(
                 }
                 service_manager.encode_restartnode_response(resp);
             }
+
+            service_manager.receive_acknowledge();
         }
 
         /* Transmit service responses if available */
@@ -568,26 +364,18 @@ static void __attribute__((noreturn)) node_run(
         }
 
         if (broadcast_manager.is_tx_done() && service_manager.is_tx_done() &&
-                !service_manager.is_rx_in_progress(current_time) &&
-                current_time > SENSOR_STARTUP_MS) {
-            if (tas_interval && current_time - tas_time >= tas_interval) {
-                uavcan::equipment::air_data::TrueAirspeed msg;
+                !service_manager.is_rx_in_progress(current_time)) {
+            if (hardpoint_interval &&
+                    current_time - hardpoint_time >= hardpoint_interval) {
+                uavcan::equipment::hardpoint::Status msg;
 
-                msg.true_airspeed = tas_out;
-                msg.true_airspeed_variance = 1.0f;
+                msg.cargo_weight = weight_n;
+                msg.cargo_weight_variance = 1.0f;
 
-                broadcast_manager.encode_trueairspeed(tas_transfer_id++, msg);
-                tas_time = current_time;
-            } else if (ias_interval &&
-                        current_time - ias_time >= ias_interval) {
-                uavcan::equipment::air_data::IndicatedAirspeed msg;
+                msg.hardpoint_id = hardpoint_id;
 
-                msg.indicated_airspeed = ias_out;
-                msg.indicated_airspeed_variance = 1.0f;
-
-                broadcast_manager.encode_indicatedairspeed(ias_transfer_id++,
-                                                           msg);
-                ias_time = current_time;
+                broadcast_manager.encode_status(hardpoint_transfer_id++, msg);
+                hardpoint_time = current_time;
             } else if (current_time - status_time >= status_interval) {
                 uavcan::protocol::NodeStatus msg;
 
@@ -615,11 +403,6 @@ static void __attribute__((noreturn)) node_run(
         */
         if (broadcast_manager.is_tx_done() && service_manager.is_tx_done() &&
                 wants_bootloader_restart) {
-            /*
-            Write the CAN bus speed and node ID to the bootloader/app shared
-            registers so the bootloader can maintain the same settings.
-            */
-            bootloader_write(&g_bootloader_app_shared);
             up_systemreset();
         }
     }

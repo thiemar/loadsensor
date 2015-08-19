@@ -51,7 +51,7 @@
 #define CONFIG_ARCH_FPU
 #define CONFIG_ARCH_CHIP_STM32F302K8
 #define CONFIG_USEC_PER_TICK 1000
-#define CONFIG_IDLETHREAD_STACKSIZE 4096
+#define CONFIG_IDLETHREAD_STACKSIZE 8192
 #define CONFIG_STM32_NOEXT_VECTORS
 #define STM32F30X
 
@@ -171,7 +171,7 @@
 #define OPT_APPLICATION_IMAGE_OFFSET OPT_BOOTLOADER_SIZE_IN_K
 #define OPT_APPLICATION_IMAGE_LENGTH (FLASH_SIZE-(OPT_BOOTLOADER_SIZE_IN_K+OPT_APPLICATION_RESERVER_IN_K))
 
-#define HW_UAVCAN_NAME "com.thiemar.p7000d-v1"
+#define HW_UAVCAN_NAME "com.thiemar.loadsensor-v1"
 #define HW_VERSION_MAJOR 1
 #define HW_VERSION_MINOR 0
 
@@ -180,8 +180,10 @@
 #define FLASH_PAGE_SIZE         STM32_FLASH_PAGESIZE
 #define FLASH_SIZE              (FLASH_NUMBER_PAGES*FLASH_PAGE_SIZE)
 
+#define PARAM_SIZE              (2 * FLASH_PAGE_SIZE)
+
 #define APPLICATION_LOAD_ADDRESS (FLASH_BASE + OPT_APPLICATION_IMAGE_OFFSET)
-#define APPLICATION_SIZE (FLASH_SIZE-OPT_APPLICATION_IMAGE_OFFSET)
+#define APPLICATION_SIZE (FLASH_SIZE-OPT_APPLICATION_IMAGE_OFFSET-PARAM_SIZE)
 #define APPLICATION_LAST_8BIT_ADDRRESS  ((uint8_t *)((APPLICATION_LOAD_ADDRESS+APPLICATION_SIZE)-sizeof(uint8_t)))
 #define APPLICATION_LAST_32BIT_ADDRRESS ((uint32_t *)((APPLICATION_LOAD_ADDRESS+APPLICATION_SIZE)-sizeof(uint32_t)))
 #define APPLICATION_LAST_64BIT_ADDRRESS ((uint64_t *)((APPLICATION_LOAD_ADDRESS+APPLICATION_SIZE)-sizeof(uint64_t)))
@@ -210,8 +212,10 @@
 #define GPIO_SENSON (GPIO_OUTPUT | GPIO_PUSHPULL | \
                      GPIO_PORTB | GPIO_PIN7 | GPIO_OUTPUT_SET)
 
-#define GPIO_NSS (GPIO_OUTPUT | GPIO_PUSHPULL | \
-                  GPIO_PORTA | GPIO_PIN15 | GPIO_OUTPUT_SET)
+#define GPIO_DOUT (GPIO_INPUT | GPIO_PORTB | GPIO_PIN4)
+
+#define GPIO_PD_SCK (GPIO_OUTPUT | GPIO_PUSHPULL | \
+                     GPIO_PORTB | GPIO_PIN3 | GPIO_OUTPUT_CLEAR)
 
 
 /************************************************************************************
@@ -257,6 +261,11 @@ inline static void board_initialize(void)
     stm32_configgpio(GPIO_CAN_RX_2);
     stm32_configgpio(GPIO_CAN_TX_2);
     stm32_configgpio(GPIO_CAN_SILENT);
+
+    stm32_configgpio(GPIO_DOUT);
+    stm32_configgpio(GPIO_PD_SCK);
+
+    stm32_configgpio(GPIO_SENSON);
 }
 
 /************************************************************************************

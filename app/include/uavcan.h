@@ -31,10 +31,7 @@ SOFTWARE.
 #include "uavcan/protocol/GetNodeInfo.hpp"
 #include "uavcan/protocol/NodeStatus.hpp"
 #include "uavcan/protocol/RestartNode.hpp"
-#include "uavcan/equipment/air_data/TrueAirspeed.hpp"
-#include "uavcan/equipment/air_data/IndicatedAirspeed.hpp"
-#include "uavcan/equipment/air_data/StaticPressure.hpp"
-#include "uavcan/equipment/air_data/StaticTemperature.hpp"
+#include "uavcan/equipment/hardpoint/Status.hpp"
 
 
 #define UAVCAN_SOF_BIT 0x80u
@@ -48,8 +45,7 @@ enum uavcan_dtid_filter_id_t {
     UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE,
     UAVCAN_PROTOCOL_GETNODEINFO,
     UAVCAN_PROTOCOL_RESTARTNODE,
-    UAVCAN_EQUIPMENT_AIR_DATA_STATICPRESSURE,
-    UAVCAN_EQUIPMENT_AIR_DATA_STATICTEMPERATURE
+    UAVCAN_EQUIPMENT_HARDPOINT_STATUS
 };
 
 
@@ -157,6 +153,12 @@ public:
         size_t offset;
         uavcan::TransferCRC message_crc = base_crc;
 
+        /* Abort if the message is too long, or if it'd overflow the buffer */
+        if (length > 8u || (int32_t)length > rx_buffer_.getSize() -
+                                             rx_buffer_.getMaxWritePos()) {
+            return;
+        }
+
         if (rx_in_progress_ && in_time - rx_time_ < UAVCAN_REQUEST_TIMEOUT) {
             if (id == rx_message_id_ &&
                     ((data[length - 1u] ^ rx_tail_) & UAVCAN_TOGGLE_BIT) &&
@@ -250,6 +252,10 @@ public:
         return has_message;
     }
 
+    void receive_acknowledge(void) {
+        rx_tail_ = rx_message_id_ = 0;
+    }
+
     /* Encoders */
 
     void encode_nodestatus(
@@ -263,26 +269,15 @@ public:
         tx_crc_ = uavcan::protocol::NodeStatus::getDataTypeSignature().toTransferCRC();
     }
 
-    void encode_trueairspeed(
+    void encode_status(
         uint8_t transfer_id,
-        const uavcan::equipment::air_data::TrueAirspeed& msg
+        const uavcan::equipment::hardpoint::Status& msg
     ) {
         start_tx_();
-        uavcan::equipment::air_data::TrueAirspeed::encode(msg, tx_codec_);
+        uavcan::equipment::hardpoint::Status::encode(msg, tx_codec_);
         tx_tail_ = (uint8_t)((transfer_id & 0x1Fu) | UAVCAN_SOF_BIT);
         tx_message_id_ = broadcast_message_id_(0u, msg.DefaultDataTypeID);
-        tx_crc_ = uavcan::equipment::air_data::TrueAirspeed::getDataTypeSignature().toTransferCRC();
-    }
-
-    void encode_indicatedairspeed(
-        uint8_t transfer_id,
-        const uavcan::equipment::air_data::IndicatedAirspeed& msg
-    ) {
-        start_tx_();
-        uavcan::equipment::air_data::IndicatedAirspeed::encode(msg, tx_codec_);
-        tx_tail_ = (uint8_t)((transfer_id & 0x1Fu) | UAVCAN_SOF_BIT);
-        tx_message_id_ = broadcast_message_id_(0u, msg.DefaultDataTypeID);
-        tx_crc_ = uavcan::equipment::air_data::IndicatedAirspeed::getDataTypeSignature().toTransferCRC();
+        tx_crc_ = uavcan::equipment::hardpoint::Status::getDataTypeSignature().toTransferCRC();
     }
 
     void encode_executeopcode_response(
@@ -343,18 +338,6 @@ public:
     }
 
     /* Decoders */
-
-    bool decode_air_data_staticpressure(
-        uavcan::equipment::air_data::StaticPressure& msg
-    ) {
-        return uavcan::equipment::air_data::StaticPressure::decode(msg, rx_codec_);
-    }
-
-    bool decode_air_data_statictemperature(
-        uavcan::equipment::air_data::StaticTemperature& msg
-    ) {
-        return uavcan::equipment::air_data::StaticTemperature::decode(msg, rx_codec_);
-    }
 
     bool decode_executeopcode_request(
         uavcan::protocol::param::ExecuteOpcode::Request& msg

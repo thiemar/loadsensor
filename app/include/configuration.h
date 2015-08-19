@@ -55,8 +55,10 @@ struct bootloader_app_descriptor {
 
 /* Up to */
 enum param_index_t {
-    PARAM_UAVCAN_TRUEAIRSPEED_INTERVAL,
-    PARAM_UAVCAN_INDICATEDAIRSPEED_INTERVAL,
+    PARAM_SENSOR_OFFSET,
+    PARAM_SENSOR_SCALE,
+    PARAM_UAVCAN_STATUS_INTERVAL,
+    PARAM_UAVCAN_HARDPOINT_ID,
     NUM_PARAMS
 };
 
@@ -70,11 +72,11 @@ enum param_type_t {
 struct param_t {
     uint8_t index;
     uint8_t public_type;
-    char name[PARAM_NAME_MAX_LEN];
+    const char* name;
     float default_value;
     float min_value;
     float max_value;
-} __attribute__ ((packed));
+};
 
 
 class Configuration {
