@@ -147,7 +147,7 @@ static void __attribute__((noreturn)) node_run(
 ) {
     size_t length, i;
     uint32_t message_id, current_time, status_time, hardpoint_time,
-             status_interval, hardpoint_interval, last_tx_time;
+             status_interval, hardpoint_interval;
     int32_t sensor_data_lsb;
     uint8_t filter_id, hardpoint_transfer_id, status_transfer_id, message[8],
             hardpoint_id, service_filter_id;
@@ -163,7 +163,7 @@ static void __attribute__((noreturn)) node_run(
     uavcan::protocol::RestartNode::Request rn_req;
 
     hardpoint_transfer_id = status_transfer_id = 0u;
-    hardpoint_time = status_time = last_tx_time = 0u;
+    hardpoint_time = status_time = 0u;
 
     service_filter_id = 0xFFu;
 
@@ -357,10 +357,9 @@ static void __attribute__((noreturn)) node_run(
         }
 
         /* Transmit service responses if available */
-        if (current_time > last_tx_time + 1u && can_is_ready(1u) &&
+        if (can_is_ready(1u) &&
                 service_manager.transmit_frame(message_id, length, message)) {
             can_tx(1u, message_id, length, message);
-            last_tx_time = current_time;
         }
 
         if (broadcast_manager.is_tx_done() && service_manager.is_tx_done() &&
@@ -391,10 +390,9 @@ static void __attribute__((noreturn)) node_run(
         }
 
         /* Transmit broadcast CAN frames if available */
-        if (current_time > last_tx_time + 1u && can_is_ready(0u) &&
+        if (can_is_ready(0u) &&
                 broadcast_manager.transmit_frame(message_id, length, message)) {
             can_tx(0u, message_id, length, message);
-            last_tx_time = current_time;
         }
 
         /*
