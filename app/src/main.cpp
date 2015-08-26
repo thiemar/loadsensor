@@ -7,6 +7,25 @@
 #include "shared.h"
 
 
+#include "uavcan/protocol/param/ExecuteOpcode.hpp"
+#include "uavcan/protocol/param/GetSet.hpp"
+#include "uavcan/protocol/file/BeginFirmwareUpdate.hpp"
+#include "uavcan/protocol/GetNodeInfo.hpp"
+#include "uavcan/protocol/NodeStatus.hpp"
+#include "uavcan/protocol/RestartNode.hpp"
+#include "uavcan/equipment/hardpoint/Status.hpp"
+
+
+enum uavcan_dtid_filter_id_t {
+    UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE = 0u,
+    UAVCAN_PROTOCOL_PARAM_GETSET,
+    UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE,
+    UAVCAN_PROTOCOL_GETNODEINFO,
+    UAVCAN_PROTOCOL_RESTARTNODE,
+    UAVCAN_EQUIPMENT_HARDPOINT_STATUS
+};
+
+
 static volatile uint32_t g_uptime;
 static struct bootloader_app_shared_t g_bootloader_app_shared;
 
@@ -230,7 +249,7 @@ static void __attribute__((noreturn)) node_run(
         */
         if (service_manager.is_rx_done() && service_manager.is_tx_done()) {
             if (service_filter_id == UAVCAN_PROTOCOL_PARAM_EXECUTEOPCODE &&
-                    service_manager.decode_executeopcode_request(xo_req)) {
+                    service_manager.decode(xo_req)) {
                 /*
                 Return OK if the opcode is understood and the controller is
                 stopped, otherwise reject.
@@ -252,9 +271,9 @@ static void __attribute__((noreturn)) node_run(
                     configuration.write_params();
                     xo_resp.ok = true;
                 }
-                service_manager.encode_executeopcode_response(xo_resp);
+                service_manager.encode_response<uavcan::protocol::param::ExecuteOpcode>(xo_resp);
             } else if (service_filter_id == UAVCAN_PROTOCOL_PARAM_GETSET &&
-                    service_manager.decode_getset_request(gs_req)) {
+                    service_manager.decode(gs_req)) {
                 uavcan::protocol::param::GetSet::Response resp;
 
                 if (!gs_req.name.empty()) {
@@ -295,7 +314,7 @@ static void __attribute__((noreturn)) node_run(
                     }
                 }
 
-                service_manager.encode_getset_response(resp);
+                service_manager.encode_response<uavcan::protocol::param::GetSet>(resp);
             } else if (service_filter_id == UAVCAN_PROTOCOL_FILE_BEGINFIRMWAREUPDATE) {
                 uavcan::protocol::file::BeginFirmwareUpdate::Response resp;
 
@@ -305,7 +324,7 @@ static void __attribute__((noreturn)) node_run(
                 */
                 resp.error = resp.ERROR_OK;
                 wants_bootloader_restart = true;
-                service_manager.encode_beginfirmwareupdate_response(resp);
+                service_manager.encode_response<uavcan::protocol::file::BeginFirmwareUpdate>(resp);
             } else if (service_filter_id == UAVCAN_PROTOCOL_GETNODEINFO) {
                 uavcan::protocol::GetNodeInfo::Response resp;
 
@@ -336,9 +355,9 @@ static void __attribute__((noreturn)) node_run(
                 /* Set the hardware name */
                 resp.name = HW_UAVCAN_NAME;
 
-                service_manager.encode_getnodeinfo_response(resp);
+                service_manager.encode_response<uavcan::protocol::GetNodeInfo>(resp);
             } else if (service_filter_id == UAVCAN_PROTOCOL_RESTARTNODE &&
-                    service_manager.decode_restartnode_request(rn_req)) {
+                    service_manager.decode(rn_req)) {
                 uavcan::protocol::RestartNode::Response resp;
 
                 /*
@@ -350,7 +369,7 @@ static void __attribute__((noreturn)) node_run(
                 } else {
                     resp.ok = false;
                 }
-                service_manager.encode_restartnode_response(resp);
+                service_manager.encode_response<uavcan::protocol::RestartNode>(resp);
             }
 
             service_manager.receive_acknowledge();
@@ -368,12 +387,12 @@ static void __attribute__((noreturn)) node_run(
                     current_time - hardpoint_time >= hardpoint_interval) {
                 uavcan::equipment::hardpoint::Status msg;
 
-                msg.cargo_weight = weight_n;
-                msg.cargo_weight_variance = 1.0f;
+                msg.payload_weight = weight_n;
+                msg.payload_weight_variance = 1.0f;
 
                 msg.hardpoint_id = hardpoint_id;
 
-                broadcast_manager.encode_status(hardpoint_transfer_id++, msg);
+                broadcast_manager.encode_message(hardpoint_transfer_id++, msg);
                 hardpoint_time = current_time;
             } else if (current_time - status_time >= status_interval) {
                 uavcan::protocol::NodeStatus msg;
@@ -383,8 +402,7 @@ static void __attribute__((noreturn)) node_run(
                 msg.mode = msg.MODE_OPERATIONAL;
                 msg.sub_mode = 0u;
                 msg.vendor_specific_status_code = 0u;
-                broadcast_manager.encode_nodestatus(status_transfer_id++,
-                                                    msg);
+                broadcast_manager.encode_message(status_transfer_id++, msg);
                 status_time = current_time;
             }
         }
